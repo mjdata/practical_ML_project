@@ -1,0 +1,214 @@
+---
+title: "Practical Machine Learning Project -- Classification"
+author:  
+date:  
+output: html_document
+---
+```{r setup, cache = F, echo = F, message = F, warning = F, tidy = T}
+library(knitr)
+options(width = 100)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA, fig.align = 'center', dpi = 100, tidy = F, cache.path = '.cache/', fig.path = 'fig/')
+
+options(xtable.type = 'html')
+knit_hooks$set(inline = function(x) {
+  if(is.numeric(x)) {
+    round(x, getOption('digits'))
+  } else {
+    paste(as.character(x), collapse = ', ')
+  }
+})
+knit_hooks$set(plot = knitr:::hook_plot_html)
+```
+
+## Executive Summary
+The goal of this project is to predict the participant's exercise manner (class A-E) using data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants, who were asked to perform barbell lifts correctly and incorrectly in 5 different ways. R package 'caret' is used in data preparation, building and tuning of a random forest model 'rf' with cross validation and in evaluation of prediction as well as in displaying. Then the model is used to predict 20 different test cases. The data for this project come from this [source](http://groupware.les.inf.puc-rio.br/har).
+
+## Submitted files 
+
+The following files are submitted in the [repo](https://github.com/mjdata/practical_ML_project.git)
+
+- practical_ML_project.html: contains the reports for the Practical Machine Learning coursera course project, including codes, results and descriptions.   
+ 
+- practical_ML_project.Rmd: A R Markdown script that creates plots, write-up files and  practical_ML_project.html.  
+ 
+- The plots and write-up files are in the same [repo](https://github.com/mjdata/practical_ML_project.git).  
+
+- The data files are in ./data of the same [repo](https://github.com/mjdata/practical_ML_project.git).
+
+## Data Preparation  
+### Loading data  
+```{r lib,results='hide',cache = F,echo = F, message = F, warning = F, tidy = T}
+library(downloader);library(readr);library(ggplot2);library(lattice); suppressMessages(library(dplyr)); library(caret); library(foreach); suppressMessages(library(randomForest)); library(doParallel); library(kernlab); library(e1071); suppressMessages(library(data.table));  
+options(warn = -1)
+```  
+
+```{r loadData}
+if (!file.exists("data")){dir.create("data")}
+if(!file.exists("./data/pml-training.csv")){
+    trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    download(trainUrl, destfile = "./data/pml-training.csv")}
+if(!file.exists("./data/pml-testing.csv")){
+    testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+    download(testUrl, destfile = "./data/pml-testing.csv")}
+pml_training <- read_csv("./data/pml-training.csv") 
+pml_testing <- read_csv("./data/pml-testing.csv");
+dim(pml_training); dim(pml_testing); table(pml_training$classe)  
+```   
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.  
+
+
+### Data cleaning  
+```{r Cleaning}
+training <- pml_training; testing <- pml_testing 
+# Remove non accelerometer meaurements columns
+training <- training[, -(1:7)]; testing <- testing[, -(1:7)] 
+
+# Remove the mostly "NA" columns 
+colsNA <- sapply(training, function(x) mean(is.na(x))) > 0.95
+training <- training[, colsNA == F]; testing <- testing[, colsNA == F]; sum(colsNA)
+
+# Remove variables with nearly zero variance
+nzv <- nearZeroVar(training) 
+training <- training[, -nzv];  testing <- testing[, -nzv];
+length(nzv)
+```  
+### Impute "NA"  
+```{r}
+if (sum(is.na(training)) > 0){ 
+    imputX <- preProcess(training, method = c("medianImpute"))
+    training <- predict(imputX, training)}
+if (sum(is.na(testing)) > 0){
+    imputX <- preProcess(testing, method = c("medianImpute"))
+    testing <- predict(imputX, testing)}
+```  
+### Resolve the linear combinations, if any  
+```{r}
+x <- training[, -ncol(training)]
+comboInfo <- findLinearCombos(x); comboInfo$remove
+```  
+### Remove the highly correlated features  
+```{r highCorr}
+hiCorr = findCorrelation(cor(x), cutoff = 0.75)
+hiCorrFeatures = names(training)[hiCorr]
+training = training[,-hiCorr]; testing = testing[,-hiCorr]
+tidy_train <- training; tidy_test <- testing
+xcor <- cor(x); #summary(xcor[upper.tri(xcor)]) 
+hiCorrFeatures; length(hiCorr)
+```  
+
+### Data Partitioning   
+```{r partition}
+set.seed(135)
+inTrain <- createDataPartition(training$classe, p = 0.6, list = F)
+trainX <- training[inTrain,-ncol(training)]
+testX <- training[-inTrain, -ncol(training)]
+trainY <- factor(training$classe[inTrain])
+testY <- factor(training$classe[-inTrain])
+dim(trainX); dim(testX);  
+```  
+## Model Building and Tuning  
+
+### Random Forest model  
+```{r rfTrain}
+cl <- makePSOCKcluster(detectCores());
+clEv <- clusterEvalQ(cl, library(foreach))
+registerDoParallel(cl)
+set.seed(3879)
+modFit <- train(x = trainX, y = trainY, 
+                method = "rf", importance = T)
+stopCluster(cl); registerDoSEQ();
+modFit$times$everything;
+```  
+
+### Training Performance  
+```{r Performance} 
+modFit
+modPerf <- getTrainPerf(modFit) 
+oobErr <- (1 - getTrainPerf(modFit)[1,1])
+modPerf <- mutate(modPerf, TrainError = oobErr)
+print(modPerf, digits = 3)
+```  
+
+### Train Accuracy (plot1.png)  
+```{r Accuracy}
+png("plot1.png", width = 480, height = 480)
+trellis.par.set(caretTheme())
+ggplot(modFit) + ggtitle("Random Forest Train Accuracy")
+newActiveDev <- dev.off()
+```  
+### Density of Accuracy and Kappa (plot2.png)  
+```{r kappa}
+png("plot2.png", width = 480, height = 480) 
+resampleHist(modFit)
+newActiveDev <- dev.off()
+```  
+### Predictor Importance (plot3.png)  
+```{r VarImp}
+vImp <- varImp(modFit, scale = FALSE)
+png("plot3.png", width = 480, height = 480) 
+trellis.par.set(caretTheme())
+plot(varImp(modFit), top = 20)
+newActiveDev <- dev.off()  
+```  
+
+## Prediction on test data  
+```{r Predicting}
+modPred <- predict(modFit, testX, type = "prob") 
+predictions <- predict(modFit, testX)
+```  
+### Confusion Matrix and "one-vs-all" statistics:  
+```{r predRes}
+confusionMatrix(predictions, testY)
+```  
+### Multiclass probablity (plot4.png)  
+```{r classProb}
+models = list(rf = modFit)
+probValues <- extractProb(models, testX, testY)
+testProbs <- subset(probValues, dataType == "Test")
+png("plot4.png", width = 480, height = 480)
+trellis.par.set(caretTheme())
+plotClassProbs(testProbs)
+newActiveDev <- dev.off() 
+```  
+
+## Out-of-sample Error  
+`r paste0("Cross validated train error : ", round(oobErr*100, digits = 3), "%")` 
+```{r predErr}
+accuracy <- sum(predictions == testY)/length(predictions)
+oosErr <- (1 - accuracy) * 100
+paste0("Out of sample test error: ", round(oosErr, digits = 3), "%")
+```  
+ 
+## Write up  
+The written files can be used for submission of the answers to Coursera
+```{r writeUp}
+answers <- predict(modFit, newdata = testing[,-ncol(testing)])
+answers
+# Create one .CSV file with all the results: 
+submit <- data.frame(problem_id = testing$problem_id, classe = answers)
+write.csv(submit, file = "coursera-submission.csv", row.names = FALSE)
+ 
+# Create 20 .txt files that can be uploaded one by one 
+pml_write_files = function(x){
+  n = length(x)
+  for (i in 1:n) {
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename, quote=FALSE, row.names=FALSE,  col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```  
+## Conclusion  
+ - Chose 31 out of 160 features. Eliminated 7 unrelated , 76 entirely "NA", 24 near-zero-variance and 21 highly correlated (> 0.75) ones.   
+ - Partitioned the original training data as train(0.6) and test(0.4) sets.
+ - Chose Random Forest model 'rf' to leanr one of the best models.   
+ - Used caret::train for building, training, validation and display.   
+ - Cross validation is performed automatically in train() with the default "bootstrap" resampling method with three iterations. 
+ - The accuracy=0.9831 and Kappa=0.979, averaged over cross-validation iterations reached at mtry=2, i.e. iteration with two predictors.  
+ - The out-of-sample error 0.867% is small and accuracy 0.991 and kappa 0.989 are quite high. These are results of training merely using the defaults of train().  
+ 
+## Discussion  
+ - The test accuracy is higher than the train accuracy. What the best way to trade off bias and variance? 
+ - Feautures with only a few NAs should be imputed instead of being eliminated.  
+
+ 
